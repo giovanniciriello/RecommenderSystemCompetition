@@ -40,9 +40,9 @@ class Compute_Similarity_Python:
 
         """
         """
-        Asymmetric Cosine as described in: 
+        Asymmetric Cosine as described in:
         Aiolli, F. (2013, October). Efficient top-n recommendation for very large scale binary rated datasets. In Proceedings of the 7th ACM conference on Recommender systems (pp. 273-280). ACM.
-        
+
         """
 
         super(Compute_Similarity_Python, self).__init__()

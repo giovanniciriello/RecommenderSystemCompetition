@@ -11,6 +11,7 @@ import time
 import os
 
 def check_matrix(X, format='csc', dtype=np.float32):
+
     """
     This function takes a matrix as input and transforms it into the specified format.
     The matrix in input can be either sparse or ndarray.
@@ -24,7 +25,7 @@ def check_matrix(X, format='csc', dtype=np.float32):
 
 
     if format == 'csc' and not isinstance(X, sps.csc_matrix):
-        return X.tocsc().astype(dtype)
+        return sps.csc_matrix(X).astype(dtype)
     elif format == 'csr' and not isinstance(X, sps.csr_matrix):
         return X.tocsr().astype(dtype)
     elif format == 'coo' and not isinstance(X, sps.coo_matrix):

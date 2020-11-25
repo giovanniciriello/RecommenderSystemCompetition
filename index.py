@@ -11,15 +11,67 @@ from sklearn.linear_model import ElasticNet
 import time
 import sys
 
+from Base.Recommender_utils import check_matrix
+from Base.Evaluation.Evaluator import EvaluatorHoldout
+from Base.BaseSimilarityMatrixRecommender import BaseItemSimilarityMatrixRecommender
+from Base.IR_feature_weighting import okapi_BM_25, TF_IDF
+from Base.Similarity.Compute_Similarity import Compute_Similarity
+
+
+class ItemKNNCBFRecommender(BaseItemSimilarityMatrixRecommender):
+    """ ItemKNN recommender"""
+
+    RECOMMENDER_NAME = "ItemKNNCBFRecommender"
+
+    FEATURE_WEIGHTING_VALUES = ["BM25", "TF-IDF", "none"]
+
+    def __init__(self, URM_train, ICM_train, verbose=True):
+        super(ItemKNNCBFRecommender, self).__init__(URM_train, verbose=verbose)
+
+        self.ICM_train = ICM_train
+
+    def fit(self, topK=10, shrink=100, similarity='cosine', normalize=True, feature_weighting="none", **similarity_args):
+
+        self.topK = topK
+        self.shrink = shrink
+
+        if feature_weighting not in self.FEATURE_WEIGHTING_VALUES:
+            raise ValueError("Value for 'feature_weighting' not recognized. Acceptable values are {}, provided was '{}'".format(
+                self.FEATURE_WEIGHTING_VALUES, feature_weighting))
+
+        if feature_weighting == "BM25":
+            self.ICM_train = self.ICM_train.astype(np.float32)
+            self.ICM_train = okapi_BM_25(self.ICM_train)
+
+        elif feature_weighting == "TF-IDF":
+            self.ICM_train = self.ICM_train.astype(np.float32)
+            self.ICM_train = TF_IDF(self.ICM_train)
+
+        similarity = Compute_Similarity(self.ICM_train, shrink=shrink, topK=topK,
+                                        normalize=normalize, similarity=similarity, **similarity_args)
+
+        self.W_sparse = similarity.compute_similarity()
+        self.W_sparse = check_matrix(self.W_sparse, format='csr')
 
 def load_data(file_name):
     return pd.read_csv("./data/{}.csv".format(file_name),
-                       names=["user_id", "item_id", "rating"],
+                       names=["user_id", "item_id", "data"],
                        header=0,
                        dtype={
         "user_id": np.uint32,
         "item_id": np.uint32,
-        "rating": np.uint32  # np.double
+        "data": np.uint32  # np.double
+    })
+
+
+def load_icm(file_name):
+    return pd.read_csv("./data/{}.csv".format(file_name),
+                       names=["item_id", "token_id", "data"],
+                       header=0,
+                       dtype={
+        "item_id": np.uint32,
+        "token_id": np.uint32,
+        "data": np.float32  # np.double
     })
 
 
@@ -54,9 +106,9 @@ def dataset_splits(ratings, num_users, num_items, validation_percentage: float, 
     (user_ids_training, user_ids_test,
      item_ids_training, item_ids_test,
      ratings_training, ratings_test) = train_test_split(
-        ratings.mapped_user_id,
-        ratings.mapped_item_id,
-        ratings.rating,
+        ratings.user_id,
+        ratings.item_id,
+        ratings.data,
         test_size=testing_percentage,
         shuffle=True,
         random_state=seed)
@@ -71,17 +123,11 @@ def dataset_splits(ratings, num_users, num_items, validation_percentage: float, 
         shuffle=True,
         random_state=seed)
 
-    urm_train = sp.csr_matrix((ratings_training, (user_ids_training, item_ids_training)),
-                              shape=(num_users, num_items)
-                              )
+    urm_train = sp.csr_matrix((ratings_training, (user_ids_training, item_ids_training)))
 
-    urm_validation = sp.csr_matrix((ratings_validation, (user_ids_validation, item_ids_validation)),
-                                   shape=(num_users, num_items)
-                                   )
+    urm_validation = sp.csr_matrix((ratings_validation, (user_ids_validation, item_ids_validation)))
 
-    urm_test = sp.csr_matrix((ratings_test, (user_ids_test, item_ids_test)),
-                             shape=(num_users, num_items)
-                             )
+    urm_test = sp.csr_matrix((ratings_test, (user_ids_test, item_ids_test)))
 
     return urm_train, urm_validation, urm_test
 
@@ -106,10 +152,9 @@ def similarity(urm: sp.csc_matrix, shrink: int):
 
     np.fill_diagonal(weights, 0.0)
 
+    print(weights)
+
     return weights
-
-
-class CFItemKNN(object):
 
     def __init__(self, shrink: int):
         self.shrink = shrink
@@ -139,7 +184,8 @@ class CFItemKNN(object):
         ranking = np.flip(np.argsort(ranking))
 
         return ranking[:at]
-class SLIMElasticNetRecommender(object):
+
+
     """
     Train a Sparse Linear Methods (SLIM) item similarity model.
     NOTE: ElasticNet solver is parallel, a single intance of SLIM_ElasticNet will
@@ -185,8 +231,8 @@ class SLIMElasticNetRecommender(object):
                                 copy_X=False,
                                 precompute=True,
                                 selection='random',
-                                max_iter=100,
-                                tol=1e-4)
+                                max_iter=500,
+                                tol=1e-1)
 
         URM_train = sp.csc_matrix(self.URM_train)
 
@@ -214,8 +260,7 @@ class SLIMElasticNetRecommender(object):
             start_pos = URM_train.indptr[currentItem]
             end_pos = URM_train.indptr[currentItem + 1]
 
-            current_item_data_backup = URM_train.data[start_pos: end_pos].copy(
-            )
+            current_item_data_backup = URM_train.data[start_pos: end_pos].copy()
             URM_train.data[start_pos: end_pos] = 0.0
 
             # fit one ElasticNet model per column
@@ -323,57 +368,6 @@ def mean_average_precision(recommentations: np.array, relevant_items: np.array) 
     return map_score
 
 
-def evaluator(recommender: object, urm_train: sp.csr_matrix, URM_test: sp.csr_matrix):
-
-    num_recommendations = 10
-    cumulative_precision = 0
-    cumulative_recall = 0
-    cumulative_MAP = 0
-
-    num_users = urm_train.shape[0]
-    num_users_evaluated = 0
-    num_users_skipped = 0
-
-    for user_id in range(num_users):
-
-        user_profile_start = urm_test.indptr[user_id]
-        user_profile_end = urm_test.indptr[user_id+1]
-
-        relevant_items = urm_test.indices[user_profile_start:user_profile_end]
-
-        if relevant_items.size == 0:
-            num_users_skipped += 1
-            continue
-
-        recommendations = recommender.recommend(
-            user_id=user_id, at=num_recommendations, urm_train=urm_train, remove_seen=True)
-
-        cumulative_precision += precision(recommendations, relevant_items)
-        cumulative_recall += recall(recommendations, relevant_items)
-        cumulative_MAP += mean_average_precision(
-            recommendations, relevant_items)
-
-        num_users_evaluated += 1
-
-        if len(relevant_items) > 0:
-
-            recommended_items = recommender.recommend(
-                user_id=user_id, urm_train=urm_train, at=num_recommendations)
-            num_users_evaluated += 1
-
-            cumulative_precision += precision(recommended_items,
-                                              relevant_items)
-            cumulative_recall += recall(recommended_items, relevant_items)
-            cumulative_MAP += mean_average_precision(
-                recommended_items, relevant_items)
-
-        cumulative_precision /= max(num_users_evaluated, 1)
-        cumulative_recall /= max(num_users_evaluated, 1)
-        cumulative_MAP /= max(num_users_evaluated, 1)
-
-    return cumulative_precision, cumulative_recall, cumulative_MAP, num_users_evaluated, num_users_skipped
-
-
 def hyperparameter_tuning():
     shrinks = [0, 1, 5, 10, 50]
     results = []
@@ -381,7 +375,7 @@ def hyperparameter_tuning():
         print(f"Trying shrink {shrink}")
 
         itemknn_recommender = CFItemKNN(shrink=shrink)
-        itemknn_recommender.fit(urm_train.tocsc(), similarity)
+        itemknn_recommender.fit(urm_validatio.tocsc(), similarity)
 
         ev_precision, ev_recall, ev_map, _, _ = evaluator(
             itemknn_recommender, urm_train, urm_validation)
@@ -403,12 +397,9 @@ def prepare_submission(ratings: pd.DataFrame, users_to_recommend: np.array, urm_
         user_id = row.user_id
         mapped_user_id = row.mapped_user_id
 
-        recommendations = recommender.recommend(user_id=mapped_user_id,
-                                                at=recommendation_length,
-                                                exclude_seen=True)
+        recommendations = recommender.recommend(user_id=mapped_user_id, at=recommendation_length, urm_train=urm_train)
 
-        submission.append(
-            (user_id, [mapping_to_item_id[item_id] for item_id in recommendations]))
+        submission.append((user_id, [item_id for item_id in recommendations]))
 
     return submission
 
@@ -427,10 +418,16 @@ def write_submission(submissions):
 
 
 ratings = load_data("data_train")
-ratings, num_users, num_items = preprocess_data(ratings)
-urm_train, urm_validation, urm_test = dataset_splits(
-    ratings, num_users, num_items, validation_percentage=0.10, testing_percentage=0.20)
-weights = similarity(urm_train.tocsc(), shrink=5)
+icm = load_icm("data_ICM_title_abstract")
+# _, num_users, num_items = preprocess_data(ratings)
+
+num_users = ratings.user_id.unique().size
+num_items = ratings.item_id.unique().size
+
+urm_train, urm_validation, urm_test = dataset_splits(ratings=ratings, num_users=num_users,num_items=num_items, validation_percentage=0.1, testing_percentage=0.2)
+
+
+# weights = similarity(urm_train.tocsc(), shrink=10)
 
 # itemknn_recommender = CFItemKNN(shrink=50)
 # itemknn_recommender.fit(urm_train.tocsc(), similarity)
@@ -453,15 +450,23 @@ for user_id in range(10):
 
 # print(hyperparameter_tuning())
 
-best_shrink = 50
-urm_train_validation = urm_train + urm_validation
+# best_shrink = 50
+# urm_train_validation = urm_train + urm_validation
 
-recommender = SLIMElasticNetRecommender(urm_train_validation)
+#recommender = SLIMElasticNetRecommender(urm_train)
+#recommender.fit()
+
+recommender = ItemKNNCBFRecommender(URM_train=urm_train, ICM_train=icm)
 recommender.fit()
 
-# best_recommender = CFItemKNN(shrink=best_shrink)
-# best_recommender.fit(urm_train_validation.tocsc(), similarity)
-users_to_recommend = np.random.choice(ratings.user_id.unique(), size=urm_train_validation.shape[0], replace=False)
+evaluator = EvaluatorHoldout(urm_test, [5, 20], exclude_seen=True)
+results_run, results_run_string = evaluator.evaluateRecommender(recommender)
 
-submission = prepare_submission(ratings, users_to_recommend, urm_train_validation, recommender)
-write_submission(submission)
+logFile = open("./result_all_algorithms.txt", "a")
+
+# users_to_recommend = np.random.choice(ratings.user_id.unique(), size=urm_train_validation.shape[0], replace=False)
+
+# submission = prepare_submission(ratings, users_to_recommend, urm_train_validation, recommender)
+print("Algorithm: {}, results: \n{}".format(recommender.__class__, results_run_string))
+logFile.write("Algorithm: {}, results: \n{}\n".format(recommender.__class__, results_run_string))
+logFile.flush()

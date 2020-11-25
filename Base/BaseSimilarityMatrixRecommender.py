@@ -87,6 +87,9 @@ class BaseItemSimilarityMatrixRecommender(BaseSimilarityMatrixRecommender):
             item_scores_all = user_profile_array.dot(self.W_sparse).toarray()
             item_scores[:, items_to_compute] = item_scores_all[:, items_to_compute]
         else:
+            print(user_profile_array.shape)
+            print(self.W_sparse)
+            exit()
             item_scores = user_profile_array.dot(self.W_sparse).toarray()
 
         return item_scores
