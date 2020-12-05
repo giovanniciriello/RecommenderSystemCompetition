@@ -1,14 +1,11 @@
 import os
 from typing import Tuple, Callable, Dict, Optional, List
-
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 import datetime
-
 from sklearn.model_selection import train_test_split
 from sklearn.metrics.pairwise import pairwise_distances
-
 
 def load_data(file_name):
     return pd.read_csv("./data/{}.csv".format(file_name),
@@ -47,6 +44,32 @@ def preprocess_data(ratings: pd.DataFrame):
     return ratings, num_users, num_items
 
 
+def preprocess_icm(importances: pd.DataFrame):
+    unique_items = importances.item_id.unique()
+    unique_features = importances.feature_id.unique()
+
+    num_items, min_item_id, max_item_id = unique_items.size, unique_items.min(), unique_items.max()
+    num_features, min_feature_id, max_feature_id = unique_features.size, unique_features.min(
+    ), unique_features.max()
+
+    mapping_item_id = pd.DataFrame({
+        "mapped_item_id": np.arange(num_items),
+        "item_id": unique_items
+    })
+
+    mapping_feature_id = pd.DataFrame({
+        "mapped_feature_id": np.arange(num_features),
+        "feature_id": unique_features
+    })
+
+    importances = pd.merge(
+        left=importances, right=mapping_item_id, how="inner", on="item_id")
+    importances = pd.merge(
+        left=importances, right=mapping_feature_id, how="inner", on="feature_id")
+
+    return importances, num_items, num_features
+
+
 def dataset_splits(ratings, num_users, num_items, validation_percentage: float, testing_percentage: float):
     seed = 1516
 
@@ -77,17 +100,21 @@ def dataset_splits(ratings, num_users, num_items, validation_percentage: float, 
     return urm_train, urm_validation, urm_test
 
 
-def matrix_similarity(urm: sp.csc_matrix, shrink: int):
-    item_weights = np.sqrt(
-        np.sum(urm.power(2), axis=0)
-    ).A
-
-    numerator = urm.T.dot(urm)
-    denominator = item_weights.T.dot(item_weights) + shrink + 1e-6
-    weights = numerator / denominator
-    np.fill_diagonal(item_similarity, 0.0)
-
-    return weights
+def matrix_similarity(shrink: int):
+    icm_csv = pd.read_csv("./data/data_ICM_title_abstract.csv",
+                          names=["item_id", "feature_id", "importance"],
+                          header=0,
+                          dtype={
+                              "item_id": np.int32,
+                              "feature_id": np.int32,
+                              "importance": np.longdouble
+                          })
+    icm, num_items, num_features = preprocess_icm(icm_csv)
+    icm = icm[['importance', 'mapped_item_id', 'mapped_feature_id']]
+    matrix = pd.pivot_table(icm, values="importance",index="mapped_item_id", columns="mapped_feature_id")
+    matrix = matrix.fillna(0)
+    item_similarity = 1-pairwise_distances(matrix, metric='cosine')
+    return item_similarity
 
 
 class CFItemKNN(object):
@@ -100,13 +127,19 @@ class CFItemKNN(object):
             raise TypeError(
                 f"We expected a CSC matrix, we got {type(urm_train)}")
 
-        self.weights = similarity_function(urm_train, self.shrink)
+        self.weights = similarity_function(self.shrink)
 
     def recommend(self, user_id: int, urm_train: sp.csr_matrix, at: Optional[int] = None, remove_seen: bool = True):
-
         user_profile = urm_train[user_id]
 
-        ranking = user_profile.dot(self.weights).A.flatten()
+        items = np.zeros(self.weights.shape[0])
+        for item_id in urm_train[user_id].indices:
+            items[item_id] = 1
+
+        print('items array dimension', items.shape)
+        print('weights matrix dimension', self.weights.shape)
+
+        ranking = items.dot(self.weights)
 
         if remove_seen:
             user_profile_start = urm_train.indptr[user_id]
@@ -224,7 +257,6 @@ def prepare_submission(ratings: pd.DataFrame, users_to_recommend: np.array, urm_
 
     return submission
 
-
 def write_submission(submissions):
     now = datetime.datetime.now()
     with open("./submission-"+(now.strftime("%Y%m%d%H%M%S"))+".csv", "w") as f:
@@ -232,15 +264,10 @@ def write_submission(submissions):
         for user_id, items in submissions:
             f.write(f"{user_id},{' '.join([str(item) for item in items])}\n")
 
-
-
-
-
 ratings = load_data("data_train")
 ratings, num_users, num_items = preprocess_data(ratings)
 
 urm_train, urm_validation, urm_test = dataset_splits(ratings, num_users, num_items, validation_percentage=0.10, testing_percentage=0.20)
-
 urm_csc = urm_train.tocsc()
 
 # itemknn_recommender = CFItemKNN(shrink=50)
@@ -262,9 +289,6 @@ print(hyperparameter_results)
 
 best_shrink = 50
 urm_train_validation = urm_train + urm_validation
-
-print(type(urm_train))
-exit()
 
 best_recommender = CFItemKNN(shrink=best_shrink)
 best_recommender.fit(urm_train_validation.tocsc(), matrix_similarity)

@@ -36,7 +36,6 @@ class SLIMElasticNetRecommender(BaseItemSimilarityMatrixRecommender):
         http://glaros.dtc.umn.edu/gkhome/fetch/papers/SLIM2011icdm.pdf
     """
 
-    RECOMMENDER_NAME = "SLIMElasticNetRecommender"
 
     def __init__(self, URM_train, verbose=True):
         super(SLIMElasticNetRecommender, self).__init__(
